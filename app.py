@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import time
-from polygon import RESTClient
+from massive import RESTClient   # ← Updated import
 from datetime import datetime, timedelta
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -27,12 +27,12 @@ RECIPIENT_EMAIL = st.sidebar.text_input("Recipient Email", value="your@email.com
 RUN_SCAN = st.sidebar.button("🚀 Run Fresh Scan", type="primary")
 
 # ================== SECRETS ==================
-POLYGON_API_KEY = st.secrets.get("POLYGON_API_KEY")
+MASSIVE_API_KEY = st.secrets.get("MASSIVE_API_KEY")   # ← Updated key name
 GMAIL_SENDER = st.secrets.get("GMAIL_SENDER")
 GMAIL_APP_PASSWORD = st.secrets.get("GMAIL_APP_PASSWORD")
 
-if not POLYGON_API_KEY:
-    st.error("Add POLYGON_API_KEY in Streamlit Secrets")
+if not MASSIVE_API_KEY:
+    st.error("Add MASSIVE_API_KEY in Streamlit Secrets")
     st.stop()
 
 LOOKBACKS = [1450, 1260, 1008, 756, 504, 252, 126, 50, 20, 10, 5]
@@ -61,7 +61,7 @@ def count_high_volume_momentum(aggs, lookback):
 
 def send_scan_email(df, recipient):
     if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
-        st.warning("Email credentials not configured in secrets.")
+        st.warning("Email credentials not configured.")
         return False
 
     try:
@@ -77,18 +77,16 @@ def send_scan_email(df, recipient):
         Stocks Found: {len(df)}
         Top 10 Stocks: {', '.join(df['Ticker'].head(10).tolist())}
         
-        Full list attached as CSV.
+        Full list attached.
         """
         msg.attach(MIMEText(body, 'plain'))
 
-        # Attach CSV
         csv_bytes = df.to_csv(index=False).encode('utf-8')
         attachment = MIMEApplication(csv_bytes, _subtype="csv")
         attachment.add_header('Content-Disposition', 'attachment', 
                             filename=f"sugar_babies_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
         msg.attach(attachment)
 
-        # Send
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
@@ -101,7 +99,7 @@ def send_scan_email(df, recipient):
 
 # ================== MAIN SCAN LOGIC ==================
 if RUN_SCAN:
-    client = RESTClient(api_key=POLYGON_API_KEY)
+    client = RESTClient(api_key=MASSIVE_API_KEY)   # ← Updated client usage
     
     with st.spinner("Fetching tickers..."):
         tickers = get_active_tickers(client, MAX_TICKERS)
@@ -164,15 +162,13 @@ if RUN_SCAN:
         st.subheader("Top 100 Sugar Babies")
         st.dataframe(df.head(100), use_container_width=True, hide_index=True)
 
-        # Download
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download CSV", csv, f"sugar_babies_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
 
-        # Email Notification
         if ENABLE_EMAIL and RECIPIENT_EMAIL:
-            with st.spinner("Sending email notification..."):
+            with st.spinner("Sending email..."):
                 if send_scan_email(df, RECIPIENT_EMAIL):
-                    st.success(f"📧 Email sent to **{RECIPIENT_EMAIL}** with full results!")
+                    st.success(f"📧 Email sent to **{RECIPIENT_EMAIL}**!")
 
         st.session_state['last_scan'] = df
     else:
@@ -182,4 +178,4 @@ elif 'last_scan' in st.session_state:
     st.subheader("Previous Scan Results")
     st.dataframe(st.session_state['last_scan'].head(100), use_container_width=True, hide_index=True)
 
-st.caption("Polygon.io + Streamlit • Email via Gmail SMTP")
+st.caption("Powered by Massive.com (formerly Polygon.io)")
