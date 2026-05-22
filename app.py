@@ -1,73 +1,185 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
-from tqdm import tqdm
+import time
+from polygon import RESTClient
+from datetime import datetime, timedelta
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 import warnings
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="Stockbee Sugar Babies Scanner", layout="wide")
+st.set_page_config(page_title="Sugar Babies Scanner", layout="wide", page_icon="🍭")
 st.title("🍭 Sugar Babies (SB Setup) Scanner")
-st.markdown("**Momentum stocks with repeated 4%+ moves on 9M+ volume days**")
+st.markdown("**Dynamic Momentum Scanner** — Repeated 4%+ moves on 9M+ volume")
 
-# Config
+# ================== SIDEBAR ==================
+st.sidebar.header("Scan Settings")
+MIN_PRICE = st.sidebar.slider("Minimum Price ($)", 1.0, 20.0, 2.0)
+MIN_AVG_VOLUME = st.sidebar.number_input("Minimum Avg Daily Volume", 100000, 5000000, 500000)
+MAX_TICKERS = st.sidebar.slider("Max Tickers to Scan", 500, 5000, 2000)
+
+st.sidebar.header("Email Notification")
+ENABLE_EMAIL = st.sidebar.checkbox("Send email when scan completes", value=True)
+RECIPIENT_EMAIL = st.sidebar.text_input("Recipient Email", value="your@email.com")
+
+RUN_SCAN = st.sidebar.button("🚀 Run Fresh Scan", type="primary")
+
+# ================== SECRETS ==================
+POLYGON_API_KEY = st.secrets.get("POLYGON_API_KEY")
+GMAIL_SENDER = st.secrets.get("GMAIL_SENDER")
+GMAIL_APP_PASSWORD = st.secrets.get("GMAIL_APP_PASSWORD")
+
+if not POLYGON_API_KEY:
+    st.error("Add POLYGON_API_KEY in Streamlit Secrets")
+    st.stop()
+
 LOOKBACKS = [1450, 1260, 1008, 756, 504, 252, 126, 50, 20, 10, 5]
-MIN_PRICE = st.sidebar.slider("Min Price", 1.0, 10.0, 2.0)
-MIN_AVG_VOL = st.sidebar.number_input("Min Avg Volume", 100_000, 2_000_000, 500_000)
 
-def count_high_volume_momentum(df, lookback):
-    if len(df) < lookback or df.empty:
+# ================== HELPER FUNCTIONS ==================
+@st.cache_data(ttl=86400)
+def get_active_tickers(client, max_tickers):
+    tickers = []
+    for t in client.list_tickers(market="stocks", active=True, limit=1000):
+        if len(tickers) >= max_tickers:
+            break
+        if t.ticker and t.ticker.isalpha():
+            tickers.append(t.ticker)
+    return tickers
+
+def count_high_volume_momentum(aggs, lookback):
+    if len(aggs) < lookback:
         return 0
-    df = df.tail(lookback).copy()
+    df = pd.DataFrame(aggs).tail(lookback)
     condition = (
-        (df['Close'] / df['Close'].shift(1) >= 1.04) &
-        (df['Volume'] > df['Volume'].shift(1)) &
-        (df['Volume'] >= 8_900_000)
+        (df['close'] / df['close'].shift(1) >= 1.04) &
+        (df['volume'] > df['volume'].shift(1)) &
+        (df['volume'] >= 8900000)
     )
     return int(condition.sum())
 
-if st.button("🚀 Run Fresh Scan (this may take 5-15 mins)", type="primary"):
-    with st.spinner("Downloading data and scanning..."):
-        # Get tickers
-        url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
-        tickers = pd.read_csv(url, header=None)[0].tolist()[:3000]  # Limit for cloud speed
+def send_scan_email(df, recipient):
+    if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
+        st.warning("Email credentials not configured in secrets.")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = GMAIL_SENDER
+        msg['To'] = recipient
+        msg['Subject'] = f"Sugar Babies Scan Complete - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+        body = f"""
+        Sugar Babies (SB Setup) Scan Results
         
-        results = []
-        progress_bar = st.progress(0)
+        Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
+        Stocks Found: {len(df)}
+        Top 10 Stocks: {', '.join(df['Ticker'].head(10).tolist())}
         
-        for i, ticker in enumerate(tqdm(tickers)):
-            try:
-                data = yf.download(ticker, period="max", progress=False, auto_adjust=True)
-                if len(data) < 100 or data['Volume'].mean() < MIN_AVG_VOL:
-                    continue
-                price = data['Close'].iloc[-1]
-                if price < MIN_PRICE:
-                    continue
-                
-                counts = {f"count_{lb}": count_high_volume_momentum(data, lb) for lb in LOOKBACKS}
-                
-                results.append({
-                    'Ticker': ticker,
-                    'Price': round(price, 2),
-                    'AvgVolume': int(data['Volume'].mean()),
-                    **counts
-                })
-            except:
+        Full list attached as CSV.
+        """
+        msg.attach(MIMEText(body, 'plain'))
+
+        # Attach CSV
+        csv_bytes = df.to_csv(index=False).encode('utf-8')
+        attachment = MIMEApplication(csv_bytes, _subtype="csv")
+        attachment.add_header('Content-Disposition', 'attachment', 
+                            filename=f"sugar_babies_{datetime.now().strftime('%Y%m%d_%H%M')}.csv")
+        msg.attach(attachment)
+
+        # Send
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Failed to send email: {str(e)}")
+        return False
+
+# ================== MAIN SCAN LOGIC ==================
+if RUN_SCAN:
+    client = RESTClient(api_key=POLYGON_API_KEY)
+    
+    with st.spinner("Fetching tickers..."):
+        tickers = get_active_tickers(client, MAX_TICKERS)
+        st.info(f"Scanning **{len(tickers)}** stocks...")
+
+    results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for i, ticker in enumerate(tickers):
+        status_text.text(f"Processing {ticker} ({i+1}/{len(tickers)})")
+        try:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=2555)
+
+            aggs = list(client.get_aggs(
+                ticker, 1, "day", 
+                from_=start_date.strftime("%Y-%m-%d"),
+                to=end_date.strftime("%Y-%m-%d"),
+                limit=50000
+            ))
+
+            if len(aggs) < 150:
                 continue
+
+            df_agg = pd.DataFrame(aggs)
+            avg_vol = df_agg['volume'].mean()
             
-            progress_bar.progress(min((i+1)/len(tickers), 1.0))
-        
+            if avg_vol < MIN_AVG_VOLUME:
+                continue
+            current_price = df_agg['close'].iloc[-1]
+            if current_price < MIN_PRICE:
+                continue
+
+            counts = {f"count_{lb}": count_high_volume_momentum(aggs, lb) for lb in LOOKBACKS}
+
+            results.append({
+                'Ticker': ticker,
+                'Price': round(current_price, 2),
+                'AvgVolume': int(avg_vol),
+                **counts
+            })
+
+        except:
+            continue
+
+        progress_bar.progress(min((i + 1) / len(tickers), 1.0))
+        time.sleep(0.25)
+
+    if results:
         df = pd.DataFrame(results)
         sort_cols = [f"count_{lb}" for lb in sorted(LOOKBACKS, reverse=True)]
         df = df.sort_values(by=sort_cols, ascending=False)
-        
-        cols = ['Ticker', 'Price', 'AvgVolume'] + [f"count_{lb}" for lb in LOOKBACKS]
-        df = df[cols]
-        
-        st.success(f"Scan complete! Found {len(df)} stocks.")
-        st.dataframe(df.head(100), use_container_width=True)
-        
-        csv = df.to_csv(index=False).encode()
-        st.download_button("📥 Download Full CSV", csv, "sugar_babies_watchlist.csv", "text/csv")
 
-# Display last run info or cached results if you implement caching
-st.info("💡 For faster runs, consider using Polygon.io API instead of yfinance.")
+        final_cols = ['Ticker', 'Price', 'AvgVolume'] + [f"count_{lb}" for lb in LOOKBACKS]
+        df = df[final_cols]
+
+        st.success(f"✅ Scan Complete! **{len(df)}** stocks found.")
+
+        st.subheader("Top 100 Sugar Babies")
+        st.dataframe(df.head(100), use_container_width=True, hide_index=True)
+
+        # Download
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download CSV", csv, f"sugar_babies_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+
+        # Email Notification
+        if ENABLE_EMAIL and RECIPIENT_EMAIL:
+            with st.spinner("Sending email notification..."):
+                if send_scan_email(df, RECIPIENT_EMAIL):
+                    st.success(f"📧 Email sent to **{RECIPIENT_EMAIL}** with full results!")
+
+        st.session_state['last_scan'] = df
+    else:
+        st.error("No stocks matched your criteria.")
+
+elif 'last_scan' in st.session_state:
+    st.subheader("Previous Scan Results")
+    st.dataframe(st.session_state['last_scan'].head(100), use_container_width=True, hide_index=True)
+
+st.caption("Polygon.io + Streamlit • Email via Gmail SMTP")
